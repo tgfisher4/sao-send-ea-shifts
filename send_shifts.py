@@ -18,10 +18,11 @@ from sys import argv
 # If modifying these scopes, delete the file token.pickle.
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly']
 
+TEST_SPREADSHEET_ID = '1kPOfF-8sRcpXUTZv8K15ZaWRg9dZjLQv9VPyMk_2Obk'
 EA_SPREADSHEET_ID   = '1LemZzn9txszU_KJvwrJk3ZbnwXxn8HLQBl8Cf90LrGs'
 EA_EVENTS_RANGE     = 'Events!A2:I'
-EVENT_COLUMN_NAMES = ['event_name', 'location', 'date', 'event_time', 'report_time', 'num_EAs', 'meeting_point', 'notes', 'group']
-EVENT_COLUMN_IDXS  = {col: idx for idx, col in enumerate(EVENT_COLUMN_NAMES)}
+EVENT_COLUMN_NAMES  = ['event_name', 'location', 'date', 'event_time', 'report_time', 'num_EAs', 'meeting_point', 'notes', 'group']
+EVENT_COLUMN_IDXS   = {col: idx for idx, col in enumerate(EVENT_COLUMN_NAMES)}
 DEFAULT_GROUP       = '2'
 EA_SCHED_RANGE      = 'EA / Events!A2:C'
 SCHED_COLUMN_NAMES  = ['event_name', 'date', 'EAs']
@@ -33,8 +34,10 @@ def usage(ret_code=0):
     print('\n'.join(f'''
 usage: {argv[0]} [options]
 
+Prints to stdout a GroupMe message requesting EAs for a group's next events.
+
 options:
-    -g <group_num>              Send reminder message for the next events in the spreadsheet for group <group_num>
+    -g <group_num>              Generate message for group <group_num>'s next events
     -m <custom_message>         Include <custom_message> in message greeting
         '''.split('\n')[1:-1]))
     exit(ret_code)
@@ -66,9 +69,11 @@ def get_sheets_API_obj():
 
     return sheets_API_obj
 
-def get_events(sheet):
+def get_events(sheet, use_test_sheet):
     ''' isolate impure functionality '''
-    results = sheet.values().get(spreadsheetId=EA_SPREADSHEET_ID,
+
+    sheet_to_use = EA_SPREADSHEET_ID if not use_test_sheet else TEST_SPREADSHEET_ID
+    results = sheet.values().get(spreadsheetId=sheet_to_use,
                                 range=EA_EVENTS_RANGE).execute()
     values = results.get('values', [])
 
@@ -78,9 +83,10 @@ def get_events(sheet):
 
     return values
 
-def get_schedule(sheet):
+def get_schedule(sheet, use_test_sheet):
     ''' isolate impure functionality '''
-    results = sheet.values().get(spreadsheetId=EA_SPREADSHEET_ID,
+    sheet_to_use = EA_SPREADSHEET_ID if not use_test_sheet else TEST_SPREADSHEET_ID
+    results = sheet.values().get(spreadsheetId=sheet_to_use,
                                 range=EA_SCHED_RANGE).execute()
     values = results.get('values', [])
 
@@ -113,11 +119,11 @@ def day_of_event(event, column_idxs=EVENT_COLUMN_IDXS):
     return day_pieces['day_info']
 
 def event_to_str(event, schedule, column_idxs=EVENT_COLUMN_IDXS):
-    rem_EAs = int(event[column_idxs['num_EAs']]) - num_EAs_scheduled(event[column_idxs['event_name']], schedule) if event[column_idxs['num_EAs']] else '?'
-    return f'  {event[column_idxs["event_name"]]} - {event[column_idxs["location"]]}: {rem_EAs} EA{"" if rem_EAs != "?" and int(rem_EAs) == 1 else "s"} {clean_time_str(event[column_idxs["report_time"]] or event[column_idxs["event_time"]])}'
+    rem_EAs = '-'.join(map(lambda ext: str(int(ext)-num_EAs_scheduled(event[column_idxs['event_name']], schedule)), event[column_idxs['num_EAs']].split('-'))) if event[column_idxs['num_EAs']] else '?'
+    return f'  {event[column_idxs["event_name"]]} - {event[column_idxs["location"]]}: {rem_EAs} EA{"" if rem_EAs != "?" and "-" not in rem_EAs and int(rem_EAs) == 1 else "s"} {clean_time_str(event[column_idxs["report_time"]] or event[column_idxs["event_time"]])}'
 
 def clean_time_str(time_str):
-    time_regex  = re.compile(r'(?P<start_hr>\d{1,2})(?P<start_colon>:)?(?(start_colon)(?P<start_min>\d{2}))(?P<start_m>pm|PM|AM|am)?\s?-\s?(?P<end_hr>\d{1,2})(?P<end_colon>:)?(?(end_colon)(?P<end_min>\d{2}))(?P<end_m>pm|PM|AM|am)')
+    time_regex  = re.compile(r'(?P<start_hr>\d{1,2})(?::(?P<start_min>\d{2}))?(?P<start_m>pm|PM|AM|am)?\s?-\s?(?P<end_hr>\d{1,2})(?::(?P<end_min>\d{2}))?(?P<end_m>pm|PM|AM|am)')
     time_pieces = time_regex.match(time_str).groupdict()
 
     clean_time  = f'{time_pieces["start_hr"]}:{time_pieces["start_min"] or "00"}{(time_pieces["start_m"] and time_pieces["start_m"].lower()) or time_pieces["end_m"].lower()} - {time_pieces["end_hr"]}:{time_pieces["end_min"] or "00"}{time_pieces["end_m"].lower()}'
@@ -146,6 +152,8 @@ def process_args():
             to_return['group'] = next(to_process)
         elif arg == '-m':
             to_return['message'] = next(to_process)
+        elif arg == '-t':
+            to_return['test'] = True
         elif arg in ['-h', '--help']:
             usage(0)
         else:
@@ -160,13 +168,14 @@ def main():
     arg_dict = process_args()
     group = arg_dict.get('group', DEFAULT_GROUP)
     custom_message = arg_dict.get('message', '')
+    use_test_sheet = arg_dict.get('test', False)
 
     sheets_API_obj = get_sheets_API_obj()
     
-    next_events = list(get_next_events(get_events(sheets_API_obj), group))
+    next_events = list(get_next_events(get_events(sheets_API_obj, use_test_sheet), group))
 
     if next_events:
-        print(message_from_events(next_events, get_schedule(sheets_API_obj), custom_message))
+        print(message_from_events(next_events, get_schedule(sheets_API_obj, use_test_sheet), custom_message))
     else:
         print("No upcoming events")
 
