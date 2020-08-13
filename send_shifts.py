@@ -9,7 +9,7 @@ from google.auth.transport.requests import Request
 from pprint import pprint
 from itertools import dropwhile, takewhile
 import re
-from datetime import date
+from datetime import date, time, datetime
 import calendar
 from more_itertools import nth
 from sys import argv
@@ -120,9 +120,16 @@ def day_of_event(event, column_idxs=EVENT_COLUMN_IDXS):
 
 def event_to_str(event, schedule, column_idxs=EVENT_COLUMN_IDXS):
     rem_EAs = '-'.join(map(lambda ext: str(int(ext)-num_EAs_scheduled(event[column_idxs['event_name']], schedule)), event[column_idxs['num_EAs']].split('-'))) if event[column_idxs['num_EAs']] else '?'
-    return f'  {event[column_idxs["event_name"]]} - {event[column_idxs["location"]]}: {rem_EAs} EA{"" if rem_EAs != "?" and "-" not in rem_EAs and int(rem_EAs) == 1 else "s"} {clean_time_str(event[column_idxs["report_time"]] or event[column_idxs["event_time"]])}'
+    return f'  {event[column_idxs["event_name"]]} - {event[column_idxs["location"]]}: {rem_EAs} EA{"" if rem_EAs != "?" and "-" not in rem_EAs and int(rem_EAs) == 1 else "s"} {clean_time_rg_str(event[column_idxs["report_time"]] or event[column_idxs["event_time"]])}'
 
-def clean_time_str(time_str):
+def event_to_datetime_range(event, column_idxs=EVENT_COLUMN_IDXS):
+    date = date_str_to_obj(event[column_idxs['date']])
+    time_range = map(lambda t_s: time_str_to_obj(t_s.rstrip().lstrip()), clean_time_rg_str(event[column_idxs['report_time']]).split('-'))
+
+    return tuple(map(lambda t_o: datetime.combine(date, t_o), time_range))
+
+def clean_time_rg_str(time_str):
+    print(time_str)
     time_regex  = re.compile(r'(?P<start_hr>\d{1,2})(?::(?P<start_min>\d{2}))?(?P<start_m>pm|PM|AM|am)?\s?-\s?(?P<end_hr>\d{1,2})(?::(?P<end_min>\d{2}))?(?P<end_m>pm|PM|AM|am)')
     time_pieces = time_regex.match(time_str).groupdict()
 
@@ -130,10 +137,60 @@ def clean_time_str(time_str):
 
     return clean_time
 
+
+# ex: {8-11: 3}, {9-10: 2} |---> {8-9: 3, 9-10:2, 10-11:3}
+def subtract_EA_ranges(minuend, subtrahend):
+    ''' minuend, subtrahend are dicts with keys (start_datetime, end_datetime) and values <num_eas> '''
+    r1 = sorted(r1)
+    r2 = sorted(r2)
+
+    difference = {}
+
+    for minu in sorted(minuend):
+        minu_rg = tuple(map(lambda s: time_str_to_obj(s.rstrip().lstrip()), minu.split('-')))
+        subt_rg = tuple(map(lambda s: time_str_to_obj(s.rstrip().lstrip()), subtrahend.split('-')))
+
+        if not do_time_ranges_overlap(minu_rg, subt_rg):
+            continue
+        difference
+        if subt_rg[1] > minu_rg[1]:
+            # truncate subtrahend
+            subtrahend = {f'{minu_rg[0]} - {subt_rg[1]}'}
+            difference[0]
+
+
+
+    while True:
+        curr1_st, curr1_end = tuple(map(lambda s: time_str_to_obj(s.rstrip().lstrip()), curr1.split('-')))
+        curr2_st, curr2_end = tuple(map(lambda s: time_str_to_obj(s.rstrip().lstrip()), curr2.split('-')))
+        if curr2_st > curr1_st and curr2_st < curr1_end:
+            pass
+
+
+        # idea: for each subtrahend, filter the minuends s.t. we only grab those overlapping ones. then do the splitting/subtraction for those overlapping
+
+def do_time_ranges_overlap(tm_rg_1, tm_rg_2):
+    pass
+    
+
+def time_str_to_obj(clean_time_str):
+    ''' Returns time obj from a time string in the format \d{1,2}:\d{2}(am|pm) '''
+
+    return datetime.strptime(clean_time_str, "%I:%M%p").time()
+
+    time_regex = re.compile(r'(?P<hour>\d{1,2})(?P<minute>\d{2}(?P<xm>am|pm)')
+    time_pieces = time_regex.fullmatch(clean_time_str).groupdict()
+
+    hr = int(time_pieces['hour']) + (12 * time_pieces['xm'] == pm)
+    return time(hr, int(time_pieces['minute']))
+
 def first(iterable):
     return nth(iterable, 0)
         
 def date_str_to_obj(date_str):
+
+    return datetime.strptime(date_str, "%A, %B %d, %Y").date()
+
     date_regex = re.compile(r'\w+, (?P<month>\w+) (?P<day>\d{1,2}), (?P<year>\d{4})')
     date_regex = re.compile(r'\w+, (?P<month>\w+) (?P<day>\d{1,2}), (?P<year>\d{4})')
 
@@ -173,6 +230,8 @@ def main():
     sheets_API_obj = get_sheets_API_obj()
     
     next_events = list(get_next_events(get_events(sheets_API_obj, use_test_sheet), group))
+    
+    print('\n'.join(map(lambda e: f'{e}: {event_to_datetime_range(e)}', next_events)))
 
     if next_events:
         print(message_from_events(next_events, get_schedule(sheets_API_obj, use_test_sheet), custom_message))
