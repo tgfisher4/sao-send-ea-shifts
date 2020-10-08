@@ -1,4 +1,6 @@
 # sao-send-ea-shifts
+Send message requesting EAs for upcoming shifts.
+
 This repository holds a python script which grabs data from the Notre Dame Student Activities Office Event Assistant Request spreadsheet (Google Sheets) and prints a message that can be sent out requesting the appropriate number of Event Assistants for the appropriate shifts for a given day.
 
 This is a small personal project to automate a responsibility I have found tedious entailed by one of my student jobs. I work on it when I have some free time.
