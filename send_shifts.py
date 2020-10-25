@@ -1,5 +1,5 @@
 #! /usr/bin/env python3
-from __future__ import print_function
+#from __future__ import print_function
 import pickle
 import os.path
 from googleapiclient.discovery import build
@@ -9,9 +9,9 @@ from google.auth.transport.requests import Request
 from pprint import pprint
 from itertools import dropwhile, takewhile
 import re
-from datetime import date, time, datetime
+from datetime import date, time, datetime, timedelta
 import calendar
-from more_itertools import nth
+#from more_itertools import nth
 from sys import argv
 from copy import copy
 from functools import reduce
@@ -20,17 +20,23 @@ from functools import reduce
 # If modifying these scopes, delete the file token.pickle.
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly']
 
-TEST_SPREADSHEET_ID = '1kPOfF-8sRcpXUTZv8K15ZaWRg9dZjLQv9VPyMk_2Obk'
+#TEST_SPREADSHEET_ID = '1kPOfF-8sRcpXUTZv8K15ZaWRg9dZjLQv9VPyMk_2Obk'
+TEST_SPREADSHEET_ID = '1SCquG08xYxvSMSARuM_3AfGGxdxh53DGAcWIHfcvKBc'
 EA_SPREADSHEET_ID   = '1LemZzn9txszU_KJvwrJk3ZbnwXxn8HLQBl8Cf90LrGs'
-EA_EVENTS_RANGE     = 'Events!A2:I'
-EVENT_COLUMN_NAMES  = ['event_name', 'location', 'date', 'event_time', 'report_time', 'num_EAs', 'meeting_point', 'notes', 'group']
+EA_EVENTS_RANGE     = 'Events!A2:J'
+EVENT_COLUMN_NAMES  = ['event_name', 'location', 'date', 'event_time', 'report_time', 'num_EAs', 'meeting_point', 'notes', 'group', 'EAs']
 EVENT_COLUMN_IDXS   = {col: idx for idx, col in enumerate(EVENT_COLUMN_NAMES)}
 DEFAULT_GROUP       = '2'
-EA_SCHED_RANGE      = 'EA / Events!A2:C'
+#EA_SCHED_RANGE      = 'EA / Events!A2:C'
+#SCHED_COLUMN_NAMES  = ['event_name', 'date', 'EAs']
+EVENT_NAME_COLUMN   = 'Events!A2:A'
+EA_SCHED_COLUMN     = 'Events!J2:J'
 SCHED_COLUMN_NAMES  = ['event_name', 'date', 'EAs']
 SCHED_COLUMN_IDXS   = {col: idx for idx, col in enumerate(SCHED_COLUMN_NAMES)}
 
-
+# next steps:
+#   - connect with GroupMe API
+#   - allow -d flag to search a specific date
 
 def usage(ret_code=0):
     print('\n'.join(f'''
@@ -85,20 +91,32 @@ def get_events(sheet, use_test_sheet):
         print("error: no event data found")
         return None
 
+
     return values
 
 def get_schedule(sheet, use_test_sheet):
     ''' isolate impure functionality '''
     sheet_to_use = EA_SPREADSHEET_ID if not use_test_sheet else TEST_SPREADSHEET_ID
-    results = sheet.values().get(spreadsheetId=sheet_to_use,
-                                range=EA_SCHED_RANGE).execute()
-    values = results.get('values', [])
+    EA_results = sheet.values().get(spreadsheetId=sheet_to_use,
+                                range=EA_SCHED_COLUMN).execute()
+    EA_values = results.get('values', [])
 
-    if not values:
-        print("error: no scedule data found")
+    if not EA_values:
+        print("error: no schedule data found")
         return None
+    # hacky solution to get the script running after schedule tracking change
+    event_results = sheet.values().get(spreadsheetId=sheet_to_use,
+                                range=EVENT_NAME_COLUMN).execute()
+    event_values = results.get('values', [])
 
-    return values
+    if not event_values:
+        print("error: no event names found")
+        return None
+    
+    to_return = zip(EA_values, event_values) #[ (event[EVENT_COLUMN_IDXS['event_name']], event[EVENT_COLUMN_IDXS['EAs']]) for event in values ]
+    
+
+    return to_return
 
 def get_next_events(events, group, column_idxs=EVENT_COLUMN_IDXS):
     today = date.today()
@@ -110,39 +128,50 @@ def get_next_events(events, group, column_idxs=EVENT_COLUMN_IDXS):
     return next_group_events
 
 def message_from_events(events, schedule, message, is_first_req, column_idxs=EVENT_COLUMN_IDXS):
-    preface = f'{message} {"Here are our shifts for" if is_first_req else "We still need to fill the following shifts for"}'
+    events_list = list(events)
+    preface = f'{message or "Hey guys!"} {"Here are our shifts for" if is_first_req else "We still need to fill the following shifts for"} {day_of_event(first(events_list))}'
 
-    events_list = list(events) # for some reason, calling list on my iterator caused it to be consumed so I needed to save the list
-    message = f'{preface} {day_of_event(first(events_list))}:\n\n' + '\n\n'.join(map(lambda e: event_to_str(e, schedule), events_list))
+    #events = f'{preface} {day_of_event(first(events_list))}:\n\n' + '\n\n'.join(filter(lambda x: x, map(lambda e: event_to_str(e, schedule), events_list)))
+    events = '\n\n'.join(filter(lambda x: x, map(lambda e: event_to_str(e, schedule), events_list)))
 
-    return message
+    return f'{preface}\n{events}' if events else (message or 'All shifts filled! Great job guys!')
 
 def day_of_event(event, column_idxs=EVENT_COLUMN_IDXS):
     day_regex  = re.compile(r'^(?P<day_info>.*), \d{4}$')
-    day_pieces = day_regex.match(event[column_idxs['date']])
+    day_pieces = day_regex.match(event[column_idxs['date']]).groupdict()
     return day_pieces['day_info']
 
 def event_to_str(event, schedule, column_idxs=EVENT_COLUMN_IDXS):
-    rem_EAs = '-'.join(map(lambda ext: str(int(ext)-num_EAs_scheduled(event[column_idxs['event_name']], schedule)), event[column_idxs['num_EAs']].split('-'))) if event[column_idxs['num_EAs']] else '?'
+    #rem_EAs = '-'.join(map(lambda ext: str(int(ext)-num_EAs_scheduled(event[column_idxs['event_name']], schedule)), event[column_idxs['num_EAs']].split('-'))) if event[column_idxs['num_EAs']] else '?'
+
+    #pprint(list(scheduled_shifts(event[column_idxs['event_name']], schedule)))
+
+    #pprint(event_to_datetime_rg(event))
+
+    #pprint(list(map(lambda shift: {(shift or event_to_datetime_rg(event)): 1}, scheduled_shifts(event[column_idxs['event_name']], schedule))))
 
     rem_shifts = reduce(lambda running, shift: subtract_shifts(running, {(shift if shift else event_to_datetime_rg(event)): 1}),
                         scheduled_shifts(event[column_idxs['event_name']], schedule),
                         {event_to_datetime_rg(event): event[column_idxs['num_EAs']] or '?'})
+    rem_shifts_str = rem_shifts_to_str(rem_shifts)
 
-    return f'  {event[column_idxs["event_name"]]} - {event[column_idxs["location"]]}: {rem_shifts_to_str(rem_shifts)}'
+    return f'  {event[column_idxs["event_name"]]} - {event[column_idxs["location"]]}: {rem_shifts_to_str(rem_shifts)}' if rem_shifts_str else ''
 
 def rem_shifts_to_str(rem_shifts):
-    delim = '\n    '
-    return (delim if len(rem_shifts) > 1 else '') + delim.join(map(lambda time_rg: ' - '.join(map(time_to_clean_str, time_rg)) + f': {(EAs := rem_shifts[time_rg])} EA{"" if EAs != "?" and "-" not in EAs and int(EAs) == 1 else "s"}', {k: v for k, v in rem_shifts.items() if v != '0'}))
+    shift_delim = '\n    '
+    EA_delim    = ':' if len(rem_shifts) > 1 else ','
+    return (shift_delim if len(rem_shifts) > 1 else '') + shift_delim.join(map(lambda time_rg: ' - '.join(map(time_to_clean_str, time_rg)) + f'{EA_delim} {(EAs := rem_shifts[time_rg])} EA{"" if EAs != "?" and "-" not in EAs and int(EAs) == 1 else "s"}', sorted({k: v for k, v in rem_shifts.items() if v != '0'})))
 
 def time_to_clean_str(time):
     return time.strftime('%I:%M%p')
 
 def event_to_datetime_rg(event, column_idxs=EVENT_COLUMN_IDXS):
     date = date_str_to_obj(event[column_idxs['date']])
-    time_range = map(lambda t_s: time_str_to_obj(t_s.rstrip().lstrip()), clean_time_rg_str(event[column_idxs['report_time']] or event[column_idxs['event_time']]).split('-'))
+    time_range = tuple(map(lambda t_s: time_str_to_obj(t_s.rstrip().lstrip()), clean_time_rg_str(event[column_idxs['report_time']] or event[column_idxs['event_time']]).split('-')))
 
-    return tuple(map(lambda t_o: datetime.combine(date, t_o), time_range))
+    # if time range end if less than time range start, add one day to end date
+    return (datetime.combine(date, time_rg_start(time_range)),
+            datetime.combine(date + timedelta(days=(time_rg_end(time_range) < time_rg_start(time_range))), time_rg_end(time_range)))
 
 # TODO: should this function take in a clean str or a regular str?
 #   - argument for clean: establish clear pipeline instead of composing functions in other functions
@@ -150,14 +179,15 @@ def clean_time_rg_str_to_time_rg(clean_time_rg_str):
     return map(lambda t_s: time_str_to_obj(t_s.rstrip().lstrip()), clean_time_rg_str.split('-')) if clean_time_rg_str else None
 
 def clean_time_rg_str(time_str):
-    print(f'time_rg: {time_str}')
+    #print(f'time_rg: {time_str}')
     if not time_str:
         return time_str
-    time_regex  = re.compile(r'(?P<start_hr>\d{1,2})(?::(?P<start_min>\d{2}))?(?P<start_m>pm|PM|AM|am)?\s?-\s?(?P<end_hr>\d{1,2})(?::(?P<end_min>\d{2}))?(?P<end_m>pm|PM|AM|am)')
+    time_regex  = re.compile(r'(?P<start_hr>\d{1,2})(?::(?P<start_min>\d{2}))?\s?(?P<start_m>pm|PM|AM|am)?\s?-\s?(?P<end_hr>\d{1,2})(?::(?P<end_min>\d{2}))?\s?(?P<end_m>pm|PM|AM|am)')
     time_pieces = time_regex.match(time_str).groupdict()
 
     clean_time  = f'{time_pieces["start_hr"]}:{time_pieces["start_min"] or "00"}{(time_pieces["start_m"] and time_pieces["start_m"].lower()) or time_pieces["end_m"].lower()} - {time_pieces["end_hr"]}:{time_pieces["end_min"] or "00"}{time_pieces["end_m"].lower()}'
 
+    #print(clean_time)
     return clean_time
 
 # test with ranges on different days (11pm-1am, eg)
@@ -170,7 +200,7 @@ def subtract_shifts(minuend, subtrahend):
     difference = {}
 
     subt_rg = first(subtrahend)
-    print(f'before reduce: {minuend}')
+    #print(f'before reduce: {minuend}')
 
     # requires 2 passes through minuend
     # maybe create a single for loop 
@@ -179,7 +209,7 @@ def subtract_shifts(minuend, subtrahend):
                                                                   else (running[0], add_dicts(running[1], {time_rg: minuend[time_rg]})),
                                         minuend,
                                         ([], {}))
-    print(overlapping_rgs, difference, '\n')
+    #print(overlapping_rgs, difference, '\n')
     #overlapping_rgs = filter(lambda time_rg: do_time_ranges_overlap(time_rg, subt_rg), minuend)
     #difference      = {time_rg: minuend[time_rg] for time_rg in minuend if not do_time_ranges_overlap(time_rg, subt_rg)}
 
@@ -244,11 +274,14 @@ def time_str_to_obj(clean_time_str):
     hr = int(time_pieces['hour']) + (12 * time_pieces['xm'] == pm)
     return time(hr, int(time_pieces['minute']))
 
+#def first(iterable):
+#    return nth(iterable, 0)
+
 def first(iterable):
-    return nth(iterable, 0)
+    return next(iter(iterable))
         
 def date_str_to_obj(date_str):
-    print(f'date_str: {date_str}')
+    #print(f'date_str: {date_str}')
     return datetime.strptime(date_str, "%A, %B %d, %Y").date()
 
     date_regex = re.compile(r'\w+, (?P<month>\w+) (?P<day>\d{1,2}), (?P<year>\d{4})')
@@ -258,7 +291,7 @@ def date_str_to_obj(date_str):
     return date(int(date_pieces['year']), list(calendar.month_name).index(date_pieces['month']), int(date_pieces['day']))
 
 def shift_str_to_time_rg_str(EA_shift_str):
-    print(f'shift: {EA_shift_str}')
+    #print(f'shift: {EA_shift_str}')
     try:
         return re.search(r'\((.*)\)', EA_shift_str).group(1)
     except AttributeError:
@@ -269,10 +302,11 @@ def num_EAs_scheduled(event_name, schedule, column_idxs=SCHED_COLUMN_IDXS):
     return len(event_sched[column_idxs['EAs']].split(',')) if len(event_sched) >= column_idxs['EAs'] + 1 else 0
 
 def scheduled_shifts(event_name, schedule, column_idxs=SCHED_COLUMN_IDXS):
+    # potential for error here with recurring event: only ever grabs first. Should probably grab first after today
     sched_event = first(filter(lambda e: e[column_idxs['event_name']] == event_name, schedule))
     return map(lambda t_rg: tuple(map(lambda t_o: datetime.combine(date_str_to_obj(sched_event[column_idxs['date']]), t_o), t_rg)) if t_rg else None,
                map(compose(clean_time_rg_str_to_time_rg, clean_time_rg_str, shift_str_to_time_rg_str),
-                   sched_event[column_idxs['EAs']].split(','))) if len(sched_event) >= column_idxs['EAs'] + 1 else []
+                   sched_event[column_idxs['EAs']].split(','))) if sched_event and len(sched_event) >= column_idxs['EAs'] + 1 else []
 
 def process_args():
     to_return = {}
@@ -299,15 +333,20 @@ def main():
     
     arg_dict = process_args()
     group = arg_dict.get('group', DEFAULT_GROUP)
-    custom_message = arg_dict.get('message', 'Hey guys!')
+    custom_message = arg_dict.get('message', '')
     use_test_sheet = arg_dict.get('test', False)
     is_first_req   = not arg_dict.get('not_first', False)
 
     sheets_API_obj = get_sheets_API_obj()
     
     next_events = list(get_next_events(get_events(sheets_API_obj, use_test_sheet), group))
+    next_sched  = [ (event[EVENT_COLUMN_IDXS['event_name']],
+                     event[EVENT_COLUMN_IDXS['date']],
+                     event[EVENT_COLUMN_IDXS['EAs']] if len(event) > EVENT_COLUMN_IDXS['EAs'] else '')
+                     for event in next_events ]
+    #next_sched  = get_schedule(sheets_API_obj, use_test_sheet)
     
-    print('\n'.join(map(lambda e: f'{e}: {event_to_datetime_rg(e)}', next_events)))
+    #print('\n'.join(map(lambda e: f'{e}: {event_to_datetime_rg(e)}', next_events)))
 
     #event_time  = (datetime.combine(date.min, time(8, 0)), datetime.combine(date.min, time(11, 0)))
     #ea_shift    = (datetime.combine(date.min, time(9, 0)), datetime.combine(date.min, time(10, 0)))
@@ -331,7 +370,8 @@ def main():
     #pprint(subtract_shifts({multi_day_event: '3'}, {md_ea_shift: 1}))
 
     if next_events:
-        print(message_from_events(next_events, get_schedule(sheets_API_obj, use_test_sheet), custom_message, is_first_req))
+        #print(message_from_events(next_events, get_schedule(sheets_API_obj, use_test_sheet), custom_message, is_first_req))
+        print(message_from_events(next_events, next_sched, custom_message, is_first_req))
     else:
         print("No upcoming events")
 
